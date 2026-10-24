@@ -5,18 +5,25 @@ Service Bus semantics we rely on (and the in-memory queue imitates):
   If the worker crashes, the lock expires and the message is delivered again.
   => delivery is AT-LEAST-ONCE, so the worker must be idempotent.
 - abandon(): give the message back now, delivery_count goes up (used for transient errors).
+  It is available again IMMEDIATELY, so abandon is no way to "wait": use a scheduled send.
 - dead_letter(reason): move it to the dead-letter sub-queue for a human to inspect
   (used for permanent errors, and automatically once MaxDeliveryCount is reached).
-- message_id = content hash: with duplicate detection enabled on the queue, Service Bus
-  itself drops a second send of the same file inside the detection window.
+- send(delay_s=...): a scheduled message only becomes visible at that time.
+- message_id = send_id, a new id per deliberate send. Duplicate detection then drops only
+  the SDK's own network retries of the SAME send. Using the content hash as message_id
+  would also silently drop a deliberate retry or reschedule inside the detection window.
+  Duplicate files are already stopped earlier, by the unique content_hash in the database.
 """
 
 from __future__ import annotations
 
 import json
+import time
+import uuid
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 
@@ -24,6 +31,7 @@ from typing import Protocol
 class JobMessage:
     job_id: str
     content_hash: str
+    send_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -44,7 +52,7 @@ class Received(Protocol):
 
 
 class JobQueue(Protocol):
-    def send(self, message: JobMessage) -> None: ...
+    def send(self, message: JobMessage, delay_s: float = 0) -> None: ...
     def receive(self, max_messages: int = 1, max_wait_s: float = 5) -> Iterator[Received]: ...
 
 
@@ -63,7 +71,7 @@ class _MemReceived:
 
     def abandon(self) -> None:
         self.settled = True
-        self.queue._redeliver(self.body, self.delivery_count)
+        self.queue._redeliver(self.body, self.delivery_count)  # visible again at once
 
     def dead_letter(self, reason: str) -> None:
         self.settled = True
@@ -76,24 +84,34 @@ class _MemReceived:
 @dataclass
 class InMemoryQueue:
     max_delivery_count: int = 5
-    _items: deque[tuple[JobMessage, int]] = field(default_factory=deque)
+    clock: Callable[[], float] = time.monotonic  # tests swap in a fake clock
+    _items: deque[tuple[JobMessage, int, float]] = field(default_factory=deque)
     completed: list[JobMessage] = field(default_factory=list)
     dead_letters: list[tuple[JobMessage, str]] = field(default_factory=list)
 
-    def send(self, message: JobMessage) -> None:
-        self._items.append((message, 0))
+    def send(self, message: JobMessage, delay_s: float = 0) -> None:
+        self._items.append((message, 0, self.clock() + delay_s))
 
     def _redeliver(self, message: JobMessage, delivery_count: int) -> None:
         if delivery_count >= self.max_delivery_count:
             self.dead_letters.append((message, "MaxDeliveryCountExceeded"))
         else:
-            self._items.append((message, delivery_count))
+            self._items.append((message, delivery_count, self.clock()))
+
+    def _next_visible(self) -> tuple[JobMessage, int] | None:
+        now = self.clock()
+        for item in list(self._items):
+            if item[2] <= now:
+                self._items.remove(item)
+                return item[0], item[1]
+        return None
 
     def receive(self, max_messages: int = 1, max_wait_s: float = 0) -> Iterator[Received]:
         for _ in range(max_messages):
-            if not self._items:
+            nxt = self._next_visible()
+            if nxt is None:
                 return
-            message, count = self._items.popleft()
+            message, count = nxt
             received = _MemReceived(self, message, count + 1)
             yield received
             if not received.settled:  # simulate the lock expiring after a crash
@@ -140,15 +158,17 @@ class ServiceBusJobQueue:
             raise ValueError("set SERVICEBUS_NAMESPACE or SERVICEBUS_CONNECTION_STRING")
         self._queue_name = queue_name
 
-    def send(self, message: JobMessage) -> None:
+    def send(self, message: JobMessage, delay_s: float = 0) -> None:
         from azure.servicebus import ServiceBusMessage
 
+        sb_message = ServiceBusMessage(
+            message.to_json(), message_id=message.send_id, content_type="application/json"
+        )
+        if delay_s > 0:
+            sb_message.scheduled_enqueue_time_utc = (
+                datetime.now(UTC) + timedelta(seconds=delay_s))
         with self._client.get_queue_sender(self._queue_name) as sender:
-            sender.send_messages(ServiceBusMessage(
-                message.to_json(),
-                message_id=message.content_hash,
-                content_type="application/json",
-            ))
+            sender.send_messages(sb_message)
 
     def receive(self, max_messages: int = 1, max_wait_s: float = 5) -> Iterator[Received]:
         from azure.servicebus import AutoLockRenewer

@@ -4,7 +4,7 @@ permanent errors go to dead-letter, and outputs are complete only when _SUCCESS 
 from __future__ import annotations
 
 import hashlib
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from lakeflow import zones
 from lakeflow.db import ColumnProfile, IngestionJob, JobStatus
 from lakeflow.queue import JobMessage
-from lakeflow.worker import Worker
+from lakeflow.worker import Worker, utcnow
 
 
 def _submit(sf, lake, queue, src: Path, source: str = "sap_bp") -> str:
@@ -122,8 +122,39 @@ def test_gives_up_after_max_deliveries(worker, session_factory, lake, queue, bp_
     assert len(queue.dead_letters) == 1
 
 
-def test_live_lease_blocks_a_second_worker(worker, session_factory, lake, queue, bp_csv) -> None:
+def test_busy_job_is_rescheduled_not_abandoned(worker, session_factory, lake, queue,
+                                               bp_csv) -> None:
+    """A second delivery while another worker holds the lease must not burn delivery
+    attempts: it is rescheduled for when the lease ends and the original is completed."""
     src, _ = bp_csv
+    fake_now = [1000.0]
+    queue.clock = lambda: fake_now[0]
+    job_id = _submit(session_factory, lake, queue, src)
+
+    assert worker._claim(job_id) == "claimed"  # worker A is busy with it
+    worker.run_once()  # worker B gets the message
+    assert len(queue.completed) == 1 and not queue.dead_letters
+    assert len(queue) == 1  # rescheduled copy waiting
+    assert worker.run_once() == 0  # not visible yet: no hot loop
+
+    fake_now[0] += 5 * 60 + 10  # lease ends
+    with session_factory() as s:  # ...because worker A finished meanwhile
+        s.get(IngestionJob, job_id).status = JobStatus.SUCCEEDED
+        s.commit()
+    assert worker.run_once() == 1
+    assert len(queue.completed) == 2 and not queue.dead_letters
+
+
+def test_crashed_workers_job_is_taken_over_after_lease(worker, session_factory, lake, queue,
+                                                       bp_csv) -> None:
+    src, m = bp_csv
     job_id = _submit(session_factory, lake, queue, src)
     assert worker._claim(job_id) == "claimed"
-    assert worker._claim(job_id) == "busy"  # another delivery while the first still runs
+    with session_factory() as s:  # simulate a worker that died: lease in the past
+        s.get(IngestionJob, job_id).lease_until = utcnow() - timedelta(seconds=1)
+        s.commit()
+    worker.run_once()
+    with session_factory() as s:
+        job = s.get(IngestionJob, job_id)
+        assert job.status == JobStatus.SUCCEEDED and job.attempts == 2
+        assert job.rows_valid == m.rows_valid

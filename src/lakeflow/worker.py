@@ -3,10 +3,15 @@
 Idempotency and retry safety, which is the core of this file:
 
 1. CLAIM with a conditional UPDATE (compare-and-set in SQL):
-       UPDATE ingestion_job SET status='RUNNING', lease_until=now+30m, attempts=attempts+1
+       UPDATE ingestion_job SET status='RUNNING', lease_until=now+5m, attempts=attempts+1
        WHERE id=:id AND (status='QUEUED' OR (status='RUNNING' AND lease_until < now))
    Only one worker can win that row. A duplicate delivery of a finished job finds
    status='SUCCEEDED', is completed without doing any work, and nothing is written twice.
+   The lease is renewed at every stage. If a worker dies, its lease runs out, so a
+   redelivered message can take the job over. A message that arrives while another
+   worker's lease is still live is RESCHEDULED for when that lease ends, not abandoned:
+   abandon makes it visible again at once, and a tight loop of abandons would burn every
+   delivery attempt in milliseconds and dead-letter a healthy job.
 2. DETERMINISTIC OUTPUTS: every path contains the content hash; a retry first clears its
    folder, rewrites the same files, and writes a _SUCCESS marker last. Readers trust a
    folder only when _SUCCESS exists, so a half-finished attempt is never consumed.
@@ -33,13 +38,15 @@ from lakeflow.db import ColumnProfile, IngestionJob, JobStatus
 from lakeflow.detect import UnsupportedFileError, detect
 from lakeflow.ingest import convert
 from lakeflow.profile import profile_parquet
-from lakeflow.queue import JobQueue, Received
+from lakeflow.queue import JobMessage, JobQueue, Received
 from lakeflow.storage import Lake
 from lakeflow.transform import Contract, ContractError, transform
 
 log = logging.getLogger("lakeflow.worker")
 
-LEASE = timedelta(minutes=30)
+# Renewed at every stage. A stage longer than this would need a background heartbeat.
+LEASE = timedelta(minutes=5)
+RESCHEDULE_BUFFER_S = 5
 PERMANENT_ERRORS = (UnsupportedFileError, ContractError)
 
 
@@ -83,7 +90,11 @@ class Worker:
             received.complete()
             return
         if outcome == "busy":
-            received.abandon()  # another worker holds a live lease
+            # Another worker holds a live lease. Come back when it ends; if that worker
+            # finished, the next delivery sees SUCCEEDED and does nothing.
+            self.queue.send(JobMessage(job_id, received.body.content_hash),
+                            delay_s=self._lease_left_s(job_id) + RESCHEDULE_BUFFER_S)
+            received.complete()
             return
 
         try:
@@ -128,6 +139,13 @@ class Worker:
             if job.status in (JobStatus.SUCCEEDED, JobStatus.FAILED):
                 return "done"
             return "busy"
+
+    def _lease_left_s(self, job_id: str) -> float:
+        with self.sf() as s:
+            job = s.get(IngestionJob, job_id)
+            if job is None or job.lease_until is None:
+                return 0.0
+            return max((job.lease_until - utcnow()).total_seconds(), 0.0)
 
     def _update(self, job_id: str, **values: object) -> None:
         with self.sf() as s:

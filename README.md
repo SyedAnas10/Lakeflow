@@ -70,6 +70,13 @@ Results matched the planted defects exactly: 950,000 valid, 50,000 rejected,
   claims a job, so only one worker wins. A finished job redelivered is completed without
   doing any work. Outputs go to deterministic, hash-based paths: clear, write, then
   `_SUCCESS`.
+- **Leases, not abandon loops.** The 5-minute lease is renewed at every stage, so a crashed
+  worker's job is taken over once its lease runs out. A message that arrives while
+  another worker's lease is live is rescheduled for when the lease ends. Abandoning it
+  would make it visible again at once and burn every delivery attempt in milliseconds.
+- **One message id per send.** Service Bus duplicate detection then drops only the SDK's
+  own network retries. Using the file hash as the id would also drop deliberate retries;
+  duplicate files are already stopped by the unique hash in the database.
 - **Two kinds of failure.** Permanent errors (bad format, contract mismatch) are
   dead-lettered immediately. Anything else is retried by abandoning the message, up to
   `MaxDeliveryCount`.
@@ -130,6 +137,8 @@ Storage integration tests run against Azurite when `AZURITE_CONNECTION_STRING` i
 
 - Transform materialises the typed frame (about 1 GB at 1M rows). Beyond that, split the
   input by `hash(key)` into partitions and transform each one.
+- The lease is renewed between stages. A single stage longer than 5 minutes would need a
+  background heartbeat thread.
 - Profiling is the slowest stage. Patterns could be computed on a sample, or all
   columns could be profiled in a single UNPIVOT pass.
 - Excel is read one sheet at a time, not streamed.

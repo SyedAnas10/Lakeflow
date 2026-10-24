@@ -40,7 +40,7 @@ def test_settlement_mapping() -> None:
     receiver = FakeReceiver()
     r = _SbReceived(receiver, msg)
 
-    assert r.body == JobMessage("job-1", "abc")
+    assert (r.body.job_id, r.body.content_hash) == ("job-1", "abc")
     assert r.delivery_count == 2
     r.renew_lock()
     r.abandon()
@@ -50,3 +50,9 @@ def test_settlement_mapping() -> None:
     kinds = [c[0] for c in receiver.calls]
     assert kinds == ["renew", "abandon", "complete", "dead_letter"]
     assert len(receiver.calls[-1][1]) == 4096  # long error text is capped before it is sent
+
+
+def test_each_send_gets_its_own_message_id() -> None:
+    a, b = JobMessage("job-1", "abc"), JobMessage("job-1", "abc")
+    assert a.send_id != b.send_id  # a deliberate retry is not dropped as a duplicate
+    assert JobMessage.from_json(a.to_json()) == a
