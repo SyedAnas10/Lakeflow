@@ -1,0 +1,14 @@
+{
+  "object": "Business Partner - general data (example, confirm against your template)",
+  "fields": [
+    {"name": "KEY",        "length": 20,  "mandatory": true,  "source": "partner_id"},
+    {"name": "BU_TYPE",    "length": 1,   "mandatory": true,  "constant": "2"},
+    {"name": "BU_GROUP",   "length": 4,   "mandatory": true,  "constant": "BP02"},
+    {"name": "NAME_ORG1",  "length": 40,  "mandatory": true,  "source": "name"},
+    {"name": "COUNTRY",    "length": 3,   "mandatory": true,  "source": "country"},
+    {"name": "SMTP_ADDR",  "length": 241,                     "source": "email"},
+    {"name": "TEL_NUMBER", "length": 30,                      "source": "phone"},
+    {"name": "CREDIT_LIM", "length": 15,  "kind": "dec",      "source": "credit_limit"},
+    {"name": "VALID_FROM", "length": 8,   "kind": "date",     "source": "created_at"}
+  ]
+}

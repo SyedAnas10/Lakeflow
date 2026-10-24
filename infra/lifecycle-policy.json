@@ -1,0 +1,42 @@
+{
+  "rules": [
+    {
+      "name": "landing-cool-then-archive-then-delete",
+      "enabled": true,
+      "type": "Lifecycle",
+      "definition": {
+        "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["lake/landing/"] },
+        "actions": {
+          "baseBlob": {
+            "tierToCool":    { "daysAfterModificationGreaterThan": 30 },
+            "tierToArchive": { "daysAfterModificationGreaterThan": 90 },
+            "delete":        { "daysAfterModificationGreaterThan": 365 }
+          }
+        }
+      }
+    },
+    {
+      "name": "raw-cool-then-delete",
+      "enabled": true,
+      "type": "Lifecycle",
+      "definition": {
+        "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["lake/raw/"] },
+        "actions": {
+          "baseBlob": {
+            "tierToCool": { "daysAfterModificationGreaterThan": 30 },
+            "delete":     { "daysAfterModificationGreaterThan": 365 }
+          }
+        }
+      }
+    },
+    {
+      "name": "quarantine-delete",
+      "enabled": true,
+      "type": "Lifecycle",
+      "definition": {
+        "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["lake/quarantine/"] },
+        "actions": { "baseBlob": { "delete": { "daysAfterModificationGreaterThan": 90 } } }
+      }
+    }
+  ]
+}

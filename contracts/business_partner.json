@@ -1,0 +1,16 @@
+{
+  "name": "business_partner",
+  "description": "Business partner master data (customers and suppliers) before SAP migration.",
+  "key": ["partner_id"],
+  "keep_latest_by": "updated_at",
+  "columns": [
+    {"name": "partner_id", "dtype": "str", "required": true, "pattern": "^BP\\d{7}$"},
+    {"name": "name", "dtype": "str", "required": true, "max_length": 80},
+    {"name": "email", "dtype": "str", "pattern": "^[^@\\s]+@[^@\\s]+\\.[A-Za-z]{2,}$"},
+    {"name": "country", "dtype": "str", "required": true, "pattern": "^[A-Z]{2}$"},
+    {"name": "phone", "dtype": "str"},
+    {"name": "credit_limit", "dtype": "float", "min": 0},
+    {"name": "created_at", "dtype": "date", "required": true},
+    {"name": "updated_at", "dtype": "datetime", "required": true}
+  ]
+}

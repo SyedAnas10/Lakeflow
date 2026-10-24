@@ -1,0 +1,63 @@
+# Local stack: Azure Storage (Azurite), SQL Server, the Azure Service Bus emulator,
+# then the migration job, the API and two workers. Start with:
+#   cp .env.example .env && docker compose up --build
+# The Azurite account key below is Azurite's published development key, not a secret.
+
+x-app-env: &app-env
+  LAKEFLOW_DATABASE_URL: mssql+pymssql://sa:${MSSQL_SA_PASSWORD}@sqlserver:1433/lakeflow
+  LAKEFLOW_LAKE_BACKEND: azure
+  AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
+  LAKEFLOW_QUEUE_BACKEND: servicebus
+  SERVICEBUS_CONNECTION_STRING: "Endpoint=sb://servicebus;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+  LAKEFLOW_QUEUE_NAME: ingest-jobs
+
+services:
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    command: azurite-blob --blobHost 0.0.0.0 --loose
+    ports: ["10000:10000"]
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+    ports: ["1433:1433"]
+
+  servicebus:
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+    volumes:
+      - ./docker/servicebus-config.json:/ServiceBus_Emulator/ConfigFiles/Config.json
+    environment:
+      ACCEPT_EULA: "Y"
+      SQL_SERVER: sqlserver
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+    ports: ["5672:5672"]
+    depends_on: [sqlserver]
+
+  migrate:
+    build: .
+    command: ["lakeflow", "init-db"]
+    environment: *app-env
+    depends_on: [sqlserver]
+    restart: on-failure  # SQL Server needs a few seconds before it accepts logins
+
+  api:
+    build: .
+    command: ["lakeflow", "api"]
+    environment: *app-env
+    ports: ["8000:8000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      azurite: { condition: service_started }
+      servicebus: { condition: service_started }
+
+  worker:
+    build: .
+    command: ["lakeflow", "worker"]
+    environment: *app-env
+    deploy: { replicas: 2 }  # two competing consumers on one queue
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      azurite: { condition: service_started }
+      servicebus: { condition: service_started }
