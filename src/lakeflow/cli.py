@@ -109,7 +109,18 @@ def main() -> None:
 
         from lakeflow.api import create_app
 
-        uvicorn.run(create_app(s), host=args.host, port=args.port)
+        app = create_app(s)
+        if s.queue_backend == "memory":
+            # Local development: an in-memory queue lives inside this process, so a separate
+            # `lakeflow worker` process could never see its messages. Run one worker in a
+            # background thread on the same queue instead. With Service Bus, run workers apart.
+            import threading
+
+            worker = Worker(app.state.sf, app.state.lake, app.state.queue,
+                            Contract.load(s.contract), s.work_dir, s.max_delivery_count)
+            threading.Thread(target=worker.run_forever, daemon=True, name="inline-worker").start()
+            logging.getLogger("lakeflow").info("in-memory queue: started an inline worker")
+        uvicorn.run(app, host=args.host, port=args.port)
     elif args.cmd == "worker":
         queue = make_queue(s.queue_backend, connection_string=s.servicebus_connection_string,
                            queue_name=s.queue_name, max_delivery_count=s.max_delivery_count,

@@ -99,6 +99,8 @@ pytest -q                                   # unit + integration tests
 alembic upgrade head                        # SQLite by default
 python -m lakeflow.synth --rows 100000 --out data/bp.csv --encoding cp1252 --delimiter ";"
 lakeflow run data/bp.csv --source sap_bp    # one-shot local run, prints the summary
+lakeflow api                                # API on :8000 (Swagger UI at /docs); with the
+                                            # in-memory queue it also runs an inline worker
 ```
 
 Full local Azure stack (Azurite, SQL Server, Service Bus emulator, API, two workers):
