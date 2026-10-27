@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5", "mypy>=1.10"]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5", "mypy>=1.10", "xlsxwriter>=3.2"]  # xlsxwriter: tests write Excel files
 
 [project.scripts]
 lakeflow = "lakeflow.cli:main"
